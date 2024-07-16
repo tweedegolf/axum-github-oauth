@@ -1,0 +1,19 @@
+[package]
+name = "axum-github-oauth"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+axum = { version = "0.7" }
+axum-extra = { version = "0.9", features = ["typed-header", "cookie-private"] }
+http = "1.0"
+oauth2 = "4.1"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+serde = { version = "1.0", features = ["derive"] }
+tokio = { version = "1.0", features = ["full"] }
+tracing = "0.1"
+sha2 = "0.10.8"
+serde_json = "1.0.120"
+cookie = "0.18.1"
+url = "2.5.2"
+thiserror = "1.0.62"
