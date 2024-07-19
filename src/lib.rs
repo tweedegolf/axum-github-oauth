@@ -1,18 +1,19 @@
 use axum::{
-    extract::{FromRef, FromRequestParts, Query, Request, State},
-    middleware::{self, Next},
+    async_trait,
+    extract::{FromRef, FromRequestParts},
     response::{IntoResponse, Redirect, Response},
     routing::get,
     Router,
 };
-use axum_extra::extract::{cookie::Cookie, PrivateCookieJar};
+use axum_extra::extract::PrivateCookieJar;
+use handlers::{authorize, login, logout};
 use http::{
-    header::{ACCEPT, USER_AGENT},
-    HeaderValue, StatusCode,
+    request::Parts,
+    HeaderMap,
 };
 use oauth2::{
-    basic::BasicClient, reqwest::async_http_client, AuthUrl, AuthorizationCode, ClientId,
-    ClientSecret, CsrfToken, RedirectUrl, Scope, TokenResponse, TokenUrl,
+    basic::BasicClient, AuthUrl, ClientId,
+    ClientSecret, RedirectUrl, TokenUrl,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha512};
@@ -20,6 +21,7 @@ use std::env;
 use url::Url;
 
 static COOKIE_NAME: &str = "SESSION";
+static CSRF_COOKIE_NAME: &str = "CSRF";
 static USER_AGENT_VALUE: &str = "axum-github-oauth";
 
 static GITHUB_AUTH_URL: &str = "https://github.com/login/oauth/authorize";
@@ -29,15 +31,18 @@ static GITHUB_ORGS_URL: &str = "https://api.github.com/user/orgs";
 static GITHUB_ACCEPT_TYPE: &str = "application/vnd.github+json";
 
 mod error;
+mod handlers;
 
 pub use error::Error;
 
+/// Represents the GitHub OAuth service.
 #[derive(Clone)]
 pub struct GithubOauthService {
     oauth_client: BasicClient,
     config: Config,
 }
 
+/// Represents a user retrieved from GitHub.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct User {
     id: usize,
@@ -46,12 +51,13 @@ pub struct User {
     avatar_url: String,
 }
 
+/// Represents the configuration for the GitHub OAuth service.
 #[derive(Clone)]
 pub struct Config {
-    // Github endpoints
+    // github endpoints
     pub auth_url: Url,
     pub token_url: Url,
-    // Application specific settings / secrets
+    // application specific settings / secrets
     pub organisation: Option<String>,
     pub session_key: cookie::Key,
     pub redirect_url: Url,
@@ -94,10 +100,21 @@ impl FromRef<GithubOauthService> for cookie::Key {
 }
 
 impl GithubOauthService {
+    /// Creates a new instance of `GithubOauthService`.
+    ///
+    /// # Arguments
+    ///
+    /// * `config` - Optional configuration for the service. If not provided, default configuration will be used.
+    ///
+    /// # Returns
+    ///
+    /// Returns a `Result` containing the `GithubOauthService` instance or an `Error` if there was an error creating the service.
     pub fn new(config: Option<Config>) -> Result<Self, Error> {
         let config = config.unwrap_or_default();
-        let client_id = env::var("OAUTH_CLIENT_ID")?;
-        let client_secret = env::var("OAUTH_CLIENT_SECRET")?;
+        let client_id = env::var("OAUTH_CLIENT_ID")
+            .map_err(|_| Error::MissingEnvironmentVariable("OAUTH_CLIENT_ID"))?;
+        let client_secret = env::var("OAUTH_CLIENT_SECRET")
+            .map_err(|_| Error::MissingEnvironmentVariable("OAUTH_CLIENT_SECRET"))?;
 
         let oauth_client = BasicClient::new(
             ClientId::new(client_id),
@@ -113,164 +130,86 @@ impl GithubOauthService {
         })
     }
 
+    /// Checks if a given path is public.
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - The path to check.
+    ///
+    /// # Returns
+    ///
+    /// Returns `true` if the path is public, `false` otherwise.
+    pub fn is_public(&self, path: &str) -> bool {
+        path == self.config.login_path
+            || path == self.config.authorize_path
+            || path == self.config.logout_path
+    }
+
+    /// Creates a router for the GitHub OAuth service.
+    ///
+    /// # Returns
+    ///
+    /// Returns a `Router` instance for the service.
     pub fn router(&self) -> Router<GithubOauthService> {
-        let router = Router::new()
+        Router::new()
             .route(&self.config.login_path, get(login))
             .route(&self.config.authorize_path, get(authorize))
-            .route(&self.config.logout_path, get(logout));
-
-        router
+            .route(&self.config.logout_path, get(logout))
     }
 }
 
-async fn login(State(service): State<GithubOauthService>) -> impl IntoResponse {
-    let (auth_url, _csrf_token) = service
-        .oauth_client
-        .authorize_url(CsrfToken::new_random)
-        .add_scope(Scope::new("read:user".to_string()))
-        .add_scope(Scope::new("read:org".to_string()))
-        .url();
-
-    Redirect::to(auth_url.as_ref())
+/// Represents an action to perform after authentication.
+pub enum AuthAction {
+    /// Redirects to the specified path.
+    Redirect(String),
+    /// Represents an error that occurred during authentication.
+    Error(Error),
 }
 
-pub async fn logout(mut jar: PrivateCookieJar) -> impl IntoResponse {
-    if let Some(cookie) = jar.get(COOKIE_NAME) {
-        jar = jar.remove(cookie);
+impl IntoResponse for AuthAction {
+    fn into_response(self) -> Response {
+        match self {
+            Self::Redirect(path) => Redirect::temporary(&path).into_response(),
+            Self::Error(e) => e.into_response(),
+        }
     }
-
-    (jar, "You are now logged out 👋")
 }
 
+impl User {
+    /// Creates a `User` instance from the headers and the GitHub OAuth service.
+    ///
+    /// # Arguments
+    ///
+    /// * `headers` - The headers containing the session cookie.
+    /// * `state` - The GitHub OAuth service instance.
+    ///
+    /// # Returns
+    ///
+    /// Returns a `Result` containing the `User` instance or an `AuthAction` if there was an error creating the user.
+    pub fn from_headers_and_service(
+        headers: &HeaderMap,
+        state: &GithubOauthService,
+    ) -> Result<Self, AuthAction> {
+        let jar = PrivateCookieJar::from_headers(headers, state.config.session_key.clone());
+        let session_cookie = jar
+            .get(COOKIE_NAME)
+            .ok_or(AuthAction::Redirect(state.config.login_path.clone()))?;
+
+        let user: User = serde_json::from_str(session_cookie.value())
+            .map_err(|e| AuthAction::Error(Error::DeserializeUser(e)))?;
+
+        Ok(user)
+    }
+}
+
+#[async_trait]
 impl FromRequestParts<GithubOauthService> for User {
-    type Rejection = (StatusCode, String);
+    type Rejection = AuthAction;
 
-    fn from_request_parts(req: &Request, user: User) -> Self {
-        user
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &GithubOauthService,
+    ) -> Result<Self, Self::Rejection> {
+        User::from_headers_and_service(&parts.headers, state)
     }
-}
-
-/// Middleware function for authentication.
-///
-/// This function is used as a middleware in the Axum framework to handle authentication.
-/// It checks if the user is logged in by checking the session cookie. If the session cookie
-/// is present, it extracts the user information from the cookie and adds it to the request's
-/// extensions. If the session cookie is not present, it redirects the user to the login page.
-///
-/// # Arguments
-///
-/// * `state`: The application state containing the OAuth client and configuration.
-/// * `req`: The incoming request.
-/// * `next`: The next middleware or handler in the chain.
-///
-/// # Returns
-///
-/// Returns a `Result` containing either a `Response` or a `StatusCode`. If the user is logged in,
-/// it calls the next middleware or handler. If the user is not logged in, it redirects the user
-/// to the login page.
-async fn auth(
-    State(service): State<GithubOauthService>,
-    mut req: Request,
-    next: Next,
-) -> Result<Response, StatusCode> {
-    // Check the path of the request
-    match req.uri().path() {
-        // If the path is "/login" or "/authorized", call the next middleware or handler
-        "/login" | "/authorized" => Ok(next.run(req).await),
-        _ => {
-            // Extract the session cookie from the request headers
-            let jar =
-                PrivateCookieJar::from_headers(req.headers(), service.config.session_key.clone());
-
-            // Check if the session cookie is present
-            if let Some(session_cookie) = jar.get(COOKIE_NAME) {
-                // Deserialize the user information from the session cookie
-                if let Ok(user) = serde_json::from_str::<User>(session_cookie.value()) {
-                    // Add the user information to the request's extensions
-                    req.extensions_mut().insert(user);
-                    // Call the next middleware or handler
-                    Ok(next.run(req).await)
-                } else {
-                    // If the session cookie is present but the user information cannot be
-                    // deserialized, redirect the user to the login page
-                    Ok(Redirect::to("/login").into_response())
-                }
-            } else {
-                // If the session cookie is not present, redirect the user to the login page
-                Ok(Redirect::to("/login").into_response())
-            }
-        }
-    }
-}
-
-#[derive(Debug, Deserialize)]
-struct AuthRequest {
-    code: String,
-    state: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct Organisation {
-    login: String,
-}
-
-async fn authorize(
-    State(service): State<GithubOauthService>,
-    Query(query): Query<AuthRequest>,
-    jar: PrivateCookieJar,
-) -> Result<Response, Error> {
-    let token = service
-        .oauth_client
-        .exchange_code(AuthorizationCode::new(query.code.clone()))
-        .request_async(async_http_client)
-        .await
-        .map_err(|e| Error::Oauth(e.to_string()))?;
-
-    let client = reqwest::Client::new();
-    let user_data: User = client
-        .get(GITHUB_USER_URL)
-        .header(ACCEPT, HeaderValue::from_static(GITHUB_ACCEPT_TYPE))
-        .header(USER_AGENT, HeaderValue::from_static(USER_AGENT_VALUE))
-        .bearer_auth(token.access_token().secret())
-        .send()
-        .await
-        .map_err(|e| Error::FetchUser(e.to_string()))?
-        .json()
-        .await
-        .map_err(|e| Error::ParseUser(e.to_string()))?;
-
-    let orgs: Vec<Organisation> = client
-        .get(GITHUB_ORGS_URL)
-        .header(ACCEPT, HeaderValue::from_static(GITHUB_ACCEPT_TYPE))
-        .header(USER_AGENT, HeaderValue::from_static(USER_AGENT_VALUE))
-        .bearer_auth(token.access_token().secret())
-        .send()
-        .await
-        .map_err(|e| Error::FetchOrganisations(e.to_string()))?
-        .json()
-        .await
-        .map_err(|e| Error::ParseOrganisations(e.to_string()))?;
-
-    if let Some(organisation) = service.config.organisation {
-        if !orgs.iter().any(|org| org.login == organisation) {
-            return Ok(format!(
-                "User {} not in the {organisation} organisation.",
-                user_data.login
-            )
-            .into_response());
-        }
-    }
-
-    let session_cookie_value = serde_json::to_string(&user_data)?;
-
-    let mut session_cookie = Cookie::new(COOKIE_NAME, session_cookie_value);
-    session_cookie.set_http_only(true);
-    session_cookie.set_secure(true);
-    session_cookie.set_same_site(cookie::SameSite::Lax);
-    session_cookie.set_max_age(cookie::time::Duration::hours(10));
-    session_cookie.set_path("/");
-
-    let updated_jar = jar.add(session_cookie);
-
-    Ok((updated_jar, Redirect::to("/")).into_response())
 }

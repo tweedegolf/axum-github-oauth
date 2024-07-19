@@ -3,8 +3,8 @@ use http::StatusCode;
 
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
-    #[error("missing variable from environment {0}")]
-    MissingEnvironmentVariable(#[from] std::env::VarError),
+    #[error("missing variable from environment: {0}")]
+    MissingEnvironmentVariable(&'static str),
     #[error("oauth {0}")]
     Oauth(String),
     #[error("fetching github user {0}")]
@@ -17,6 +17,12 @@ pub enum Error {
     ParseOrganisations(String),
     #[error("json {0}")]
     Json(#[from] serde_json::Error),
+    #[error("failed deserializing user {0}")]
+    DeserializeUser(serde_json::Error),
+    #[error("missing csrf cookie")]
+    MissingCSRFCookie,
+    #[error("the CSRF token did not match")]
+    CSRFTokenMismatch,
 }
 
 impl IntoResponse for Error {
