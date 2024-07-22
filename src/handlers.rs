@@ -1,24 +1,23 @@
 /// This module contains the request handlers for the GitHub OAuth flow.
 /// It includes functions for login, logout, and authorization.
 /// These handlers are used by the Axum framework to handle incoming HTTP requests.
-
 use axum::{
-    extract::{Query, State},
+    extract::Query,
     response::{IntoResponse, Redirect, Response},
 };
-use axum_extra::extract::{cookie::Cookie, PrivateCookieJar};
+use axum_extra::extract::cookie::Cookie;
 use cookie::SameSite;
 use http::{
-    header::{ACCEPT, USER_AGENT}, HeaderValue,
+    header::{ACCEPT, USER_AGENT},
+    HeaderValue,
 };
-use oauth2::{
-    reqwest::async_http_client, AuthorizationCode, CsrfToken, Scope, TokenResponse,
-};
+use oauth2::{reqwest::async_http_client, AuthorizationCode, CsrfToken, Scope, TokenResponse};
 use serde::Deserialize;
+use std::fmt::Debug;
 
 use crate::{
-    Error, GithubOauthService, User, COOKIE_NAME, CSRF_COOKIE_NAME, GITHUB_ACCEPT_TYPE,
-    GITHUB_ORGS_URL, GITHUB_USER_URL, USER_AGENT_VALUE,
+    CookieStorage, Error, GithubOauthService, User, COOKIE_NAME, CSRF_COOKIE_NAME,
+    GITHUB_ACCEPT_TYPE, GITHUB_ORGS_URL, GITHUB_USER_URL, USER_AGENT_VALUE,
 };
 
 /// Handles the login request.
@@ -27,7 +26,7 @@ use crate::{
 ///
 /// # Parameters
 ///
-/// - `State(service)`: The state containing the `GithubOauthService` instance.
+/// - `service`: The `GithubOauthService` instance.
 /// - `jar`: The private cookie jar to store the CSRF token cookie.
 ///
 /// # Returns
@@ -39,9 +38,11 @@ use crate::{
 ///
 /// Returns an `Error` if there is an issue generating the CSRF token or setting the cookie.
 pub(super) async fn login(
-    State(service): State<GithubOauthService>,
-    jar: PrivateCookieJar,
+    service: GithubOauthService,
+    cookie_storage: CookieStorage,
 ) -> Result<impl IntoResponse, Error> {
+    let jar = cookie_storage.jar;
+
     // Generate the authorization URL and CSRF token
     let (auth_url, csrf_token) = service
         .oauth_client
@@ -80,7 +81,9 @@ pub(super) async fn login(
 /// # Returns
 ///
 /// Returns a tuple containing the updated cookie jar and a simple logout message.
-pub(super) async fn logout(mut jar: PrivateCookieJar) -> impl IntoResponse {
+pub(super) async fn logout(storage: CookieStorage) -> impl IntoResponse {
+    let mut jar = storage.jar;
+
     // Remove the session cookie from the cookie jar
     if let Some(cookie) = jar.get(COOKIE_NAME) {
         jar = jar.remove(cookie);
@@ -110,7 +113,7 @@ struct Organisation {
 ///
 /// # Parameters
 ///
-/// - `State(service)`: The state containing the `GithubOauthService` instance.
+/// - `service`: The `GithubOauthService` instance.
 /// - `Query(query)`: The query parameters containing the authorization code and CSRF token.
 /// - `jar`: The private cookie jar containing the CSRF token cookie.
 ///
@@ -124,10 +127,12 @@ struct Organisation {
 /// Returns an `Error` if there is an issue exchanging the authorization code for an access token,
 /// validating the CSRF token, fetching user data or organizations, or setting the session cookie.
 pub(super) async fn authorize(
-    State(service): State<GithubOauthService>,
+    service: GithubOauthService,
     Query(query): Query<AuthRequest>,
-    jar: PrivateCookieJar,
+    cookie_storage: CookieStorage,
 ) -> Result<Response, Error> {
+    let jar = cookie_storage.jar;
+
     // Exchange the authorization code for an access token
     let token = service
         .oauth_client
@@ -203,7 +208,7 @@ pub(super) async fn authorize(
     session_cookie.set_http_only(true);
     session_cookie.set_secure(true);
     session_cookie.set_same_site(cookie::SameSite::Lax);
-    session_cookie.set_max_age(cookie::time::Duration::hours(10)); 
+    session_cookie.set_max_age(cookie::time::Duration::hours(10));
     session_cookie.set_path("/");
 
     // Remove the CSRF token cookie and add the session cookie to the cookie jar

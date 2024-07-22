@@ -3,21 +3,15 @@ use axum::{
     extract::{FromRef, FromRequestParts},
     response::{IntoResponse, Redirect, Response},
     routing::get,
-    Router,
+    RequestPartsExt, Router,
 };
 use axum_extra::extract::PrivateCookieJar;
 use handlers::{authorize, login, logout};
-use http::{
-    request::Parts,
-    HeaderMap,
-};
-use oauth2::{
-    basic::BasicClient, AuthUrl, ClientId,
-    ClientSecret, RedirectUrl, TokenUrl,
-};
+use http::{request::Parts, HeaderMap};
+use oauth2::{basic::BasicClient, AuthUrl, ClientId, ClientSecret, RedirectUrl, TokenUrl};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha512};
-use std::env;
+use std::{convert::Infallible, env, fmt::Debug};
 use url::Url;
 
 static COOKIE_NAME: &str = "SESSION";
@@ -42,13 +36,47 @@ pub struct GithubOauthService {
     config: Config,
 }
 
+#[async_trait]
+impl<S> FromRequestParts<S> for GithubOauthService
+where
+    GithubOauthService: FromRef<S>,
+    S: Send + Sync,
+{
+    type Rejection = Infallible;
+
+    async fn from_request_parts(_parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
+        Ok(GithubOauthService::from_ref(state))
+    }
+}
+
+pub(crate) struct CookieStorage {
+    pub(crate) jar: PrivateCookieJar,
+}
+
+#[async_trait]
+impl<S> FromRequestParts<S> for CookieStorage
+where
+    GithubOauthService: FromRef<S>,
+    S: Send + Sync,
+{
+    type Rejection = Infallible;
+
+    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
+        let service = GithubOauthService::from_ref(state);
+        let jar =
+            PrivateCookieJar::from_headers(&parts.headers, service.config.session_key.clone());
+
+        Ok(Self { jar })
+    }
+}
+
 /// Represents a user retrieved from GitHub.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct User {
-    id: usize,
-    login: String,
-    name: String,
-    avatar_url: String,
+    pub id: usize,
+    pub login: String,
+    pub name: String,
+    pub avatar_url: String,
 }
 
 /// Represents the configuration for the GitHub OAuth service.
@@ -90,12 +118,6 @@ impl Default for Config {
             authorize_path: "/authorize".to_string(),
             logout_path: "/logout".to_string(),
         }
-    }
-}
-
-impl FromRef<GithubOauthService> for cookie::Key {
-    fn from_ref(service: &GithubOauthService) -> Self {
-        service.config.session_key.clone()
     }
 }
 
@@ -150,8 +172,12 @@ impl GithubOauthService {
     /// # Returns
     ///
     /// Returns a `Router` instance for the service.
-    pub fn router(&self) -> Router<GithubOauthService> {
-        Router::new()
+    pub fn router<S>(&self) -> Router<S>
+    where
+        GithubOauthService: FromRef<S>,
+        S: Clone + Send + Sync + 'static,
+    {
+        Router::<S>::new()
             .route(&self.config.login_path, get(login))
             .route(&self.config.authorize_path, get(authorize))
             .route(&self.config.logout_path, get(logout))
@@ -188,12 +214,12 @@ impl User {
     /// Returns a `Result` containing the `User` instance or an `AuthAction` if there was an error creating the user.
     pub fn from_headers_and_service(
         headers: &HeaderMap,
-        state: &GithubOauthService,
+        service: &GithubOauthService,
     ) -> Result<Self, AuthAction> {
-        let jar = PrivateCookieJar::from_headers(headers, state.config.session_key.clone());
+        let jar = PrivateCookieJar::from_headers(headers, service.config.session_key.clone());
         let session_cookie = jar
             .get(COOKIE_NAME)
-            .ok_or(AuthAction::Redirect(state.config.login_path.clone()))?;
+            .ok_or(AuthAction::Redirect(service.config.login_path.clone()))?;
 
         let user: User = serde_json::from_str(session_cookie.value())
             .map_err(|e| AuthAction::Error(Error::DeserializeUser(e)))?;
@@ -203,13 +229,19 @@ impl User {
 }
 
 #[async_trait]
-impl FromRequestParts<GithubOauthService> for User {
+impl<S> FromRequestParts<S> for User
+where
+    GithubOauthService: FromRef<S>,
+    S: Send + Sync,
+{
     type Rejection = AuthAction;
 
-    async fn from_request_parts(
-        parts: &mut Parts,
-        state: &GithubOauthService,
-    ) -> Result<Self, Self::Rejection> {
-        User::from_headers_and_service(&parts.headers, state)
+    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
+        let service = parts
+            .extract_with_state(state)
+            .await
+            .map_err(|_| AuthAction::Error(Error::ServiceNotFound))?;
+
+        User::from_headers_and_service(&parts.headers, &service)
     }
 }

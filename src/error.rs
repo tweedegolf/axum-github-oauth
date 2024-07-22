@@ -23,6 +23,8 @@ pub enum Error {
     MissingCSRFCookie,
     #[error("the CSRF token did not match")]
     CSRFTokenMismatch,
+    #[error("invalid state")]
+    ServiceNotFound,
 }
 
 impl IntoResponse for Error {
