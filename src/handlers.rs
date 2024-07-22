@@ -139,7 +139,7 @@ pub(super) async fn authorize(
         .exchange_code(AuthorizationCode::new(query.code.clone()))
         .request_async(async_http_client)
         .await
-        .map_err(|e| Error::Oauth(e.to_string()))?;
+        .map_err(|e| Error::OauthToken(e.to_string()))?;
 
     // Get the CSRF token cookie from the cookie jar
     let mut csrf_cookie = jar
