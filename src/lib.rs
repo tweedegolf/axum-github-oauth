@@ -75,7 +75,6 @@ where
 pub struct User {
     pub id: usize,
     pub login: String,
-    pub name: String,
     pub avatar_url: String,
 }
 
