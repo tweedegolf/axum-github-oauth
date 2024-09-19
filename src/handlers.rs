@@ -48,6 +48,7 @@ pub(super) async fn login(
         .oauth_client
         .authorize_url(CsrfToken::new_random)
         .add_scope(Scope::new("read:user".to_string()))
+        .add_scope(Scope::new("user:email".to_string()))
         .add_scope(Scope::new("read:org".to_string()))
         .url();
 
