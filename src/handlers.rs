@@ -206,6 +206,12 @@ pub(super) async fn authorize(
 
     let mut email = None;
 
+    if let Some(ref organisation) = service.config.organisation {
+        for e in &emails {
+            dbg!(e.email.clone(), e.email.contains(organisation));
+        }
+    }
+
     // find the email address that contains the organization name
     if let Some(ref organisation) = service.config.organisation {
         for e in &emails {
