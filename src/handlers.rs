@@ -17,7 +17,7 @@ use std::fmt::Debug;
 
 use crate::{
     CookieStorage, Error, GithubOauthService, User, COOKIE_NAME, CSRF_COOKIE_NAME,
-    GITHUB_ACCEPT_TYPE, GITHUB_ORGS_URL, GITHUB_USER_URL, USER_AGENT_VALUE,
+    GITHUB_ACCEPT_TYPE, GITHUB_EMAILS_URL, GITHUB_ORGS_URL, GITHUB_USER_URL, USER_AGENT_VALUE,
 };
 
 /// Handles the login request.
@@ -107,6 +107,20 @@ struct Organisation {
     login: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct GitHubUser {
+    pub id: usize,
+    pub login: String,
+    pub avatar_url: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct GitHubEmail {
+    email: String,
+    primary: bool,
+    verified: bool,
+}
+
 /// Handles the authorization request.
 /// Exchanges the authorization code for an access token,
 /// validates the CSRF token, fetches user data and organizations,
@@ -165,7 +179,7 @@ pub(super) async fn authorize(
     let client = reqwest::Client::new();
 
     // Fetch user data from the GitHub API
-    let user_data: User = client
+    let user_data: GitHubUser = client
         .get(GITHUB_USER_URL)
         .header(ACCEPT, HeaderValue::from_static(GITHUB_ACCEPT_TYPE))
         .header(USER_AGENT, HeaderValue::from_static(USER_AGENT_VALUE))
@@ -176,6 +190,54 @@ pub(super) async fn authorize(
         .json()
         .await
         .map_err(|e| Error::ParseUser(e.to_string()))?;
+
+    // Fetch email addresses from the GitHub API
+    let emails: Vec<GitHubEmail> = client
+        .get(GITHUB_EMAILS_URL)
+        .header(ACCEPT, HeaderValue::from_static(GITHUB_ACCEPT_TYPE))
+        .header(USER_AGENT, HeaderValue::from_static(USER_AGENT_VALUE))
+        .bearer_auth(token.access_token().secret())
+        .send()
+        .await
+        .map_err(|e| Error::FetchUser(e.to_string()))?
+        .json()
+        .await
+        .map_err(|e| Error::ParseUser(e.to_string()))?;
+
+    let mut email = None;
+
+    // find the email address that contains the organization name
+    if let Some(ref organisation) = service.config.organisation {
+        for e in &emails {
+            if e.email.contains(organisation) {
+                email = Some(e.email.clone());
+                break;
+            }
+        }
+    }
+
+    // if no email address contains the organization name, find the primary email address
+    if email.is_none() {
+        for e in &emails {
+            if e.primary && e.verified {
+                email = Some(e.email.clone());
+                break;
+            }
+        }
+    }
+
+    // if no primary email address is found, return an error
+    let email = match email {
+        Some(email) => email,
+        None => return Ok("No verified and primary email address found".into_response()),
+    };
+
+    let user: User = User {
+        id: user_data.id,
+        login: user_data.login,
+        email,
+        avatar_url: user_data.avatar_url,
+    };
 
     // Fetch organizations from the GitHub API
     let orgs: Vec<Organisation> = client
@@ -195,21 +257,21 @@ pub(super) async fn authorize(
         if !orgs.iter().any(|org| org.login == organisation) {
             return Ok(format!(
                 "User {} not in the {organisation} organisation.",
-                user_data.login
+                user.login
             )
             .into_response());
         }
     }
 
     // Serialize the user data as a string
-    let session_cookie_value = serde_json::to_string(&user_data)?;
+    let session_cookie_value = serde_json::to_string(&user)?;
 
     // Create a new session cookie
     let mut session_cookie = Cookie::new(COOKIE_NAME, session_cookie_value);
     session_cookie.set_http_only(true);
     session_cookie.set_secure(true);
     session_cookie.set_same_site(cookie::SameSite::Lax);
-    session_cookie.set_max_age(cookie::time::Duration::hours(10));
+    session_cookie.set_max_age(cookie::time::Duration::days(30));
     session_cookie.set_path("/");
 
     // Remove the CSRF token cookie and add the session cookie to the cookie jar

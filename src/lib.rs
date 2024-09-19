@@ -21,6 +21,7 @@ static USER_AGENT_VALUE: &str = "axum-github-oauth";
 static GITHUB_AUTH_URL: &str = "https://github.com/login/oauth/authorize";
 static GITHUB_TOKEN_URL: &str = "https://github.com/login/oauth/access_token";
 static GITHUB_USER_URL: &str = "https://api.github.com/user";
+static GITHUB_EMAILS_URL: &str = "https://api.github.com/user/emails";
 static GITHUB_ORGS_URL: &str = "https://api.github.com/user/orgs";
 static GITHUB_ACCEPT_TYPE: &str = "application/vnd.github+json";
 
