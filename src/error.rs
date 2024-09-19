@@ -61,7 +61,7 @@ impl IntoResponse for Error {
         tracing::error!("Application error: {:#}", self.to_string());
 
         let body = Html(format!(
-            r#"<h3>{}</h3><p><a href="/">Try again<a></p>"#,
+            r#"<h3>{}</h3><p><a href="/login">Try again<a></p>"#,
             self.user_message()
         ));
 
