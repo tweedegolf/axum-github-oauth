@@ -112,7 +112,7 @@ impl Default for Config {
         Self {
             auth_url: Url::parse(GITHUB_AUTH_URL).unwrap(),
             token_url: Url::parse(GITHUB_TOKEN_URL).unwrap(),
-            organisation: None,
+            organisation: env::var("ORGANISATION").ok(),
             session_key,
             redirect_url,
             login_path: "/login".to_string(),
