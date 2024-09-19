@@ -1,4 +1,4 @@
-use axum::response::{IntoResponse, Response};
+use axum::response::{Html, IntoResponse, Response};
 use http::StatusCode;
 
 #[derive(thiserror::Error, Debug)]
@@ -60,6 +60,11 @@ impl IntoResponse for Error {
     fn into_response(self) -> Response {
         tracing::error!("Application error: {:#}", self.to_string());
 
-        (StatusCode::INTERNAL_SERVER_ERROR, self.user_message()).into_response()
+        let body = Html(format!(
+            r#"<h3>{}</h3><p><a href="/">Try again<a></p>"#,
+            self.user_message()
+        ));
+
+        (StatusCode::INTERNAL_SERVER_ERROR, body).into_response()
     }
 }
