@@ -12,12 +12,13 @@ use http::{
     HeaderValue,
 };
 use oauth2::{reqwest::async_http_client, AuthorizationCode, CsrfToken, Scope, TokenResponse};
+use reqwest::redirect::Policy;
 use serde::Deserialize;
-use std::fmt::Debug;
+use std::{fmt::Debug, time::Duration};
 
 use crate::{
     CookieStorage, Error, GithubOauthService, User, COOKIE_NAME, CSRF_COOKIE_NAME,
-    GITHUB_ACCEPT_TYPE, GITHUB_EMAILS_URL, GITHUB_ORGS_URL, GITHUB_USER_URL, USER_AGENT_VALUE,
+    GITHUB_ACCEPT_TYPE, GITHUB_EMAILS_URL, GITHUB_USER_URL, USER_AGENT_VALUE,
 };
 
 /// Handles the login request.
@@ -49,7 +50,6 @@ pub(super) async fn login(
         .authorize_url(CsrfToken::new_random)
         .add_scope(Scope::new("read:user".to_string()))
         .add_scope(Scope::new("user:email".to_string()))
-        .add_scope(Scope::new("read:org".to_string()))
         .url();
 
     // Serialize the CSRF token as a string
@@ -86,7 +86,13 @@ pub(super) async fn logout(storage: CookieStorage) -> impl IntoResponse {
     let mut jar = storage.jar;
 
     // Remove the session cookie from the cookie jar
-    if let Some(cookie) = jar.get(COOKIE_NAME) {
+    if let Some(mut cookie) = jar.get(COOKIE_NAME) {
+        // Set cookie attributes (necessary for removal) and remove it from the jar
+        cookie.set_http_only(true);
+        cookie.set_secure(true);
+        cookie.set_same_site(cookie::SameSite::Lax);
+        cookie.set_path("/");
+
         jar = jar.remove(cookie);
     }
 
@@ -99,12 +105,6 @@ pub(super) async fn logout(storage: CookieStorage) -> impl IntoResponse {
 pub(super) struct AuthRequest {
     code: String,
     state: String,
-}
-
-/// Represents a GitHub organization.
-#[derive(Debug, Deserialize)]
-struct Organisation {
-    login: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -176,7 +176,11 @@ pub(super) async fn authorize(
     }
 
     // Create a new HTTP client
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .redirect(Policy::none())
+        .timeout(Duration::from_secs(2))
+        .build()
+        .map_err(|e| Error::FetchUser(e.to_string()))?;
 
     // Fetch user data from the GitHub API
     let user_data: GitHubUser = client
@@ -190,6 +194,16 @@ pub(super) async fn authorize(
         .json()
         .await
         .map_err(|e| Error::ParseUser(e.to_string()))?;
+
+    // Check the username agains an endpoint
+    if let Some(check_url) = service.config.check_url {
+        let url = check_url.replace("{username}", &user_data.login);
+        let response = client.get(&url).send().await.map_err(|_| Error::Authorized(url.clone()))?;
+
+        if !response.status().is_success() {
+            return Err(Error::Authorized(url));
+        }
+    }
 
     // Fetch email addresses from the GitHub API
     let emails: Vec<GitHubEmail> = client
@@ -207,11 +221,11 @@ pub(super) async fn authorize(
     let mut email = None;
 
     // find the email address that contains the organization name
-    if let Some(ref organisation) = service.config.organisation {
+    'outer: for domain in service.config.email_domains {
         for e in &emails {
-            if e.email.contains(organisation) {
+            if e.email.ends_with(&domain) {
                 email = Some(e.email.clone());
-                break;
+                break 'outer;
             }
         }
     }
@@ -238,30 +252,6 @@ pub(super) async fn authorize(
         email,
         avatar_url: user_data.avatar_url,
     };
-
-    // Fetch organizations from the GitHub API
-    let orgs: Vec<Organisation> = client
-        .get(GITHUB_ORGS_URL)
-        .header(ACCEPT, HeaderValue::from_static(GITHUB_ACCEPT_TYPE))
-        .header(USER_AGENT, HeaderValue::from_static(USER_AGENT_VALUE))
-        .bearer_auth(token.access_token().secret())
-        .send()
-        .await
-        .map_err(|e| Error::FetchOrganisations(e.to_string()))?
-        .json()
-        .await
-        .map_err(|e| Error::ParseOrganisations(e.to_string()))?;
-
-    // Check if the user is authorized based on the configured organization
-    if let Some(organisation) = service.config.organisation {
-        if !orgs.iter().any(|org| org.login == organisation) {
-            return Ok(format!(
-                "User {} not in the {organisation} organisation.",
-                user.login
-            )
-            .into_response());
-        }
-    }
 
     // Serialize the user data as a string
     let session_cookie_value = serde_json::to_string(&user)?;

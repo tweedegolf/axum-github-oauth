@@ -13,10 +13,8 @@ pub enum Error {
     FetchUser(String),
     #[error("parsing github user {0}")]
     ParseUser(String),
-    #[error("fetching github organisations {0}")]
-    FetchOrganisations(String),
-    #[error("parsing github organisations {0}")]
-    ParseOrganisations(String),
+    #[error("user could not be authorized by calling {0}")]
+    Authorized(String),
     #[error("json {0}")]
     Json(#[from] serde_json::Error),
     #[error("failed deserializing user {0}")]
@@ -39,12 +37,7 @@ impl Error {
             Self::OauthToken(_) => "Error fetching OAuth token".to_string(),
             Self::FetchUser(_) => "An error occurred while fetching the GitHub user".to_string(),
             Self::ParseUser(_) => "An error occurred while parsing the GitHub user".to_string(),
-            Self::FetchOrganisations(_) => {
-                "An error occurred while fetching the GitHub organisations".to_string()
-            }
-            Self::ParseOrganisations(_) => {
-                "An error occurred while parsing the GitHub organisations".to_string()
-            }
+            Self::Authorized(_) => format!("Error: {self}"),
             Self::Json(_) => "An error occurred while processing JSON".to_string(),
             Self::DeserializeUser(_) => {
                 "An error occurred while deserializing the user".to_string()

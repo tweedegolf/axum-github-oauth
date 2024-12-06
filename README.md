@@ -1,6 +1,6 @@
 # Axum github oauth
 
-Basic github oauth service for axum with an optional check whether a users belongs to a specified organisation.
+Basic github oauth service for axum with an optional check endpoint.
 
 ## Configuration
 
@@ -10,8 +10,11 @@ Environment variables:
 OAUTH_CLIENT_ID="<...snip...>"
 OAUTH_CLIENT_SECRET="<...snip...>"
 REDIRECT_URL="https://example.com/authorize"
-ORGANISATION="your-organisation-name"
 SESSION_KEY="some-long-random-string"
+# optional endpoint to check user is authorized
+CHECK_URL="https://example.com/is-authorized/{username}"
+# optional preferred email address domain
+EMAIL_DOMAIN="your-domain"
 ```
 
 ## Example
