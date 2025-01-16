@@ -157,9 +157,7 @@ pub(super) async fn authorize(
         .map_err(|e| Error::OauthToken(e.to_string()))?;
 
     // Get the CSRF token cookie from the cookie jar
-    let mut csrf_cookie = jar
-        .get(CSRF_COOKIE_NAME)
-        .ok_or_else(|| Error::MissingCSRFCookie)?;
+    let mut csrf_cookie = jar.get(CSRF_COOKIE_NAME).ok_or(Error::MissingCSRFCookie)?;
 
     // Set cookie attributes
     csrf_cookie.set_same_site(SameSite::Lax);
@@ -198,7 +196,11 @@ pub(super) async fn authorize(
     // Check the username agains an endpoint
     if let Some(check_url) = service.config.check_url {
         let url = check_url.replace("{username}", &user_data.login);
-        let response = client.get(&url).send().await.map_err(|_| Error::Authorized(url.clone()))?;
+        let response = client
+            .get(&url)
+            .send()
+            .await
+            .map_err(|_| Error::Authorized(url.clone()))?;
 
         if !response.status().is_success() {
             return Err(Error::Authorized(url));

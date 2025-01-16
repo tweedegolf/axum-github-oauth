@@ -1,5 +1,4 @@
 use axum::{
-    async_trait,
     extract::{FromRef, FromRequestParts},
     response::{IntoResponse, Redirect, Response},
     routing::get,
@@ -36,7 +35,6 @@ pub struct GithubOauthService {
     config: Config,
 }
 
-#[async_trait]
 impl<S> FromRequestParts<S> for GithubOauthService
 where
     GithubOauthService: FromRef<S>,
@@ -53,7 +51,6 @@ pub(crate) struct CookieStorage {
     pub(crate) jar: PrivateCookieJar,
 }
 
-#[async_trait]
 impl<S> FromRequestParts<S> for CookieStorage
 where
     GithubOauthService: FromRef<S>,
@@ -111,10 +108,8 @@ impl Default for Config {
         let session_key = cookie::Key::from(hasher.finalize().as_slice());
 
         let email_domains = env::var("EMAIL_DOMAIN")
-            .map(|d| d.split(',')
-            .map(|s| s.to_string())
-            .collect()
-        ).unwrap_or_default();
+            .map(|d| d.split(',').map(|s| s.to_string()).collect())
+            .unwrap_or_default();
 
         Self {
             auth_url: Url::parse(GITHUB_AUTH_URL).unwrap(),
@@ -237,7 +232,6 @@ impl User {
     }
 }
 
-#[async_trait]
 impl<S> FromRequestParts<S> for User
 where
     GithubOauthService: FromRef<S>,

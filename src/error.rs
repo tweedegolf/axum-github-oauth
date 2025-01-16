@@ -25,6 +25,8 @@ pub enum Error {
     CSRFTokenMismatch,
     #[error("invalid state")]
     ServiceNotFound,
+    #[error("{0}")]
+    CustomError(String),
 }
 
 impl Error {
@@ -45,6 +47,7 @@ impl Error {
             Self::MissingCSRFCookie => "Missing CSRF cookie".to_string(),
             Self::CSRFTokenMismatch => "The CSRF token did not match".to_string(),
             Self::ServiceNotFound => "Service not found".to_string(),
+            Self::CustomError(msg) => msg.clone(),
         }
     }
 }
@@ -58,6 +61,22 @@ impl IntoResponse for Error {
             self.user_message()
         ));
 
-        (StatusCode::INTERNAL_SERVER_ERROR, body).into_response()
+        let status_code = match self {
+            Error::MissingEnvironmentVariable(_)
+            | Error::Json(_)
+            | Error::DeserializeUser(_)
+            | Error::ServiceNotFound => StatusCode::INTERNAL_SERVER_ERROR,
+
+            Error::FetchUser(_) | Error::ParseUser(_) => StatusCode::BAD_GATEWAY,
+
+            Error::Oauth(_)
+            | Error::OauthToken(_)
+            | Error::Authorized(_)
+            | Error::MissingCSRFCookie
+            | Error::CustomError(_)
+            | Error::CSRFTokenMismatch => StatusCode::UNAUTHORIZED,
+        };
+
+        (status_code, body).into_response()
     }
 }
