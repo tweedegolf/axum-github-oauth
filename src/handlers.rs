@@ -193,18 +193,16 @@ pub(super) async fn authorize(
         .await
         .map_err(|e| Error::ParseUser(e.to_string()))?;
 
-    // Check the username agains an endpoint
-    if let Some(check_url) = service.config.check_url {
-        let url = check_url.replace("{username}", &user_data.login);
-        let response = client
-            .get(&url)
-            .send()
-            .await
-            .map_err(|_| Error::Authorized(url.clone()))?;
+    // Check the username against an endpoint
+    let url = service.config.check_url.replace("{username}", &user_data.login);
+    let response = client
+        .get(&url)
+        .send()
+        .await
+        .map_err(|_| Error::Authorized(url.clone()))?;
 
-        if !response.status().is_success() {
-            return Err(Error::Authorized(url));
-        }
+    if !response.status().is_success() {
+        return Err(Error::Authorized(url));
     }
 
     // Fetch email addresses from the GitHub API

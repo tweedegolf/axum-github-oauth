@@ -86,7 +86,7 @@ pub struct Config {
     pub email_domains: Vec<String>,
     pub session_key: cookie::Key,
     pub redirect_url: Url,
-    pub check_url: Option<String>,
+    pub check_url: String,
     // paths
     pub login_path: String,
     pub authorize_path: String,
@@ -111,13 +111,16 @@ impl Default for Config {
             .map(|d| d.split(',').map(|s| s.to_string()).collect())
             .unwrap_or_default();
 
+        let check_url = env::var("CHECK_URL")
+            .expect("missing CHECK_URL from environment");
+
         Self {
             auth_url: Url::parse(GITHUB_AUTH_URL).unwrap(),
             token_url: Url::parse(GITHUB_TOKEN_URL).unwrap(),
             email_domains,
             session_key,
             redirect_url,
-            check_url: env::var("CHECK_URL").ok(),
+            check_url,
             login_path: "/login".to_string(),
             authorize_path: "/authorize".to_string(),
             logout_path: "/logout".to_string(),

@@ -11,9 +11,9 @@ OAUTH_CLIENT_ID="<...snip...>"
 OAUTH_CLIENT_SECRET="<...snip...>"
 REDIRECT_URL="https://example.com/authorize"
 SESSION_KEY="some-long-random-string"
-# optional endpoint to check user is authorized
+# endpoint to check user is authorized
 CHECK_URL="https://example.com/is-authorized/{username}"
-# optional preferred email address domain
+# preferred email address domain
 EMAIL_DOMAIN="your-domain"
 ```
 
