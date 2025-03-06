@@ -11,7 +11,7 @@ use http::{
     header::{ACCEPT, USER_AGENT},
     HeaderValue,
 };
-use oauth2::{reqwest::async_http_client, AuthorizationCode, CsrfToken, Scope, TokenResponse};
+use oauth2::{AuthorizationCode, CsrfToken, Scope, TokenResponse};
 use reqwest::redirect::Policy;
 use serde::Deserialize;
 use std::{fmt::Debug, time::Duration};
@@ -148,11 +148,15 @@ pub(super) async fn authorize(
 ) -> Result<Response, Error> {
     let jar = cookie_storage.jar;
 
+    let http_client = reqwest::ClientBuilder::new()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()?;
+
     // Exchange the authorization code for an access token
     let token = service
         .oauth_client
         .exchange_code(AuthorizationCode::new(query.code.clone()))
-        .request_async(async_http_client)
+        .request_async(&http_client)
         .await
         .map_err(|e| Error::OauthToken(e.to_string()))?;
 

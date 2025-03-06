@@ -7,7 +7,7 @@ edition = "2021"
 axum = { version = "0.8" }
 axum-extra = { version = "0.10", features = ["typed-header", "cookie-private"] }
 http = "1.0"
-oauth2 = { version = "4.1", features = ["rustls-tls"] }
+oauth2 = { version = "5.0", features = ["rustls-tls"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 serde = { version = "1.0", features = ["derive"] }
 tokio = { version = "1.0", features = ["full"] }

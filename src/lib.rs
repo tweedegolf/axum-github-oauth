@@ -7,7 +7,7 @@ use axum::{
 use axum_extra::extract::PrivateCookieJar;
 use handlers::{authorize, login, logout};
 use http::{request::Parts, HeaderMap};
-use oauth2::{basic::BasicClient, AuthUrl, ClientId, ClientSecret, RedirectUrl, TokenUrl};
+use oauth2::{basic::BasicClient, AuthUrl, Client, ClientId, ClientSecret, RedirectUrl, TokenUrl};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha512};
 use std::{convert::Infallible, env, fmt::Debug};
@@ -28,10 +28,29 @@ mod handlers;
 
 pub use error::Error;
 
+pub type AuthClient<
+    HasAuthUrl = oauth2::EndpointSet,
+    HasDeviceAuthUrl = oauth2::EndpointNotSet,
+    HasIntrospectionUrl = oauth2::EndpointNotSet,
+    HasRevocationUrl = oauth2::EndpointNotSet,
+    HasTokenUrl = oauth2::EndpointSet,
+> = Client<
+    oauth2::basic::BasicErrorResponse,
+    oauth2::basic::BasicTokenResponse,
+    oauth2::basic::BasicTokenIntrospectionResponse,
+    oauth2::StandardRevocableToken,
+    oauth2::basic::BasicRevocationErrorResponse,
+    HasAuthUrl,
+    HasDeviceAuthUrl,
+    HasIntrospectionUrl,
+    HasRevocationUrl,
+    HasTokenUrl,
+>;
+
 /// Represents the GitHub OAuth service.
 #[derive(Clone)]
 pub struct GithubOauthService {
-    oauth_client: BasicClient,
+    oauth_client: AuthClient,
     config: Config,
 }
 
@@ -145,13 +164,11 @@ impl GithubOauthService {
         let client_secret = env::var("OAUTH_CLIENT_SECRET")
             .map_err(|_| Error::MissingEnvironmentVariable("OAUTH_CLIENT_SECRET"))?;
 
-        let oauth_client = BasicClient::new(
-            ClientId::new(client_id),
-            Some(ClientSecret::new(client_secret)),
-            AuthUrl::from_url(config.auth_url.clone()),
-            Some(TokenUrl::from_url(config.token_url.clone())),
-        )
-        .set_redirect_uri(RedirectUrl::from_url(config.redirect_url.clone()));
+        let oauth_client = BasicClient::new(ClientId::new(client_id))
+            .set_client_secret(ClientSecret::new(client_secret))
+            .set_auth_uri(AuthUrl::from_url(config.auth_url.clone()))
+            .set_token_uri(TokenUrl::from_url(config.token_url.clone()))
+            .set_redirect_uri(RedirectUrl::from_url(config.redirect_url.clone()));
 
         Ok(Self {
             oauth_client,

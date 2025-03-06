@@ -15,6 +15,8 @@ pub enum Error {
     ParseUser(String),
     #[error("user could not be authorized by calling {0}")]
     Authorized(String),
+    #[error("http client error {0}")]
+    HttpClient(#[from] reqwest::Error),
     #[error("json {0}")]
     Json(#[from] serde_json::Error),
     #[error("failed deserializing user {0}")]
@@ -40,6 +42,7 @@ impl Error {
             Self::FetchUser(_) => "An error occurred while fetching the GitHub user".to_string(),
             Self::ParseUser(_) => "An error occurred while parsing the GitHub user".to_string(),
             Self::Authorized(_) => format!("Error: {self}"),
+            Self::HttpClient(_) => "An error occurred with the HTTP client".to_string(),
             Self::Json(_) => "An error occurred while processing JSON".to_string(),
             Self::DeserializeUser(_) => {
                 "An error occurred while deserializing the user".to_string()
@@ -65,6 +68,7 @@ impl IntoResponse for Error {
             Error::MissingEnvironmentVariable(_)
             | Error::Json(_)
             | Error::DeserializeUser(_)
+            | Error::HttpClient(_)
             | Error::ServiceNotFound => StatusCode::INTERNAL_SERVER_ERROR,
 
             Error::FetchUser(_) | Error::ParseUser(_) => StatusCode::BAD_GATEWAY,
