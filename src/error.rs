@@ -57,14 +57,7 @@ impl Error {
 
 impl IntoResponse for Error {
     fn into_response(self) -> Response {
-        tracing::error!("Application error: {:#}", self.to_string());
-
-        let body = Html(format!(
-            r#"<h3>{}</h3><p><a href="/login">Try again<a></p>"#,
-            self.user_message()
-        ));
-
-        let status_code = match self {
+        let status_code = match &self {
             Error::MissingEnvironmentVariable(_)
             | Error::Json(_)
             | Error::DeserializeUser(_)
@@ -80,6 +73,13 @@ impl IntoResponse for Error {
             | Error::CustomError(_)
             | Error::CSRFTokenMismatch => StatusCode::UNAUTHORIZED,
         };
+
+        tracing::error!(error = %self, status = %status_code, "application error");
+
+        let body = Html(format!(
+            r#"<h3>{}</h3><p><a href="/login">Try again<a></p>"#,
+            self.user_message()
+        ));
 
         (status_code, body).into_response()
     }

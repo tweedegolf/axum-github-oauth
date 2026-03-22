@@ -9,12 +9,13 @@ use axum_extra::extract::cookie::Cookie;
 use cookie::SameSite;
 use http::{
     header::{ACCEPT, USER_AGENT},
-    HeaderValue,
+    HeaderMap, HeaderValue,
 };
-use oauth2::{AuthorizationCode, CsrfToken, Scope, TokenResponse};
+use oauth2::{reqwest as oauth2_reqwest, AuthorizationCode, CsrfToken, Scope, TokenResponse};
 use reqwest::redirect::Policy;
 use serde::Deserialize;
 use std::{fmt::Debug, time::Duration};
+use tracing::{debug, info, warn};
 
 use crate::{
     CookieStorage, Error, GithubOauthService, User, COOKIE_NAME, CSRF_COOKIE_NAME,
@@ -43,6 +44,10 @@ pub(super) async fn login(
     cookie_storage: CookieStorage,
 ) -> Result<impl IntoResponse, Error> {
     let jar = cookie_storage.jar;
+    info!(
+        redirect_url = %service.config.redirect_url,
+        "starting GitHub OAuth login flow"
+    );
 
     // Generate the authorization URL and CSRF token
     let (auth_url, csrf_token) = service
@@ -68,6 +73,8 @@ pub(super) async fn login(
     // Add the CSRF token cookie to the cookie jar
     let updated_jar = jar.add(csrf_cookie);
 
+    debug!(authorize_url = %auth_url, "generated GitHub authorization URL");
+
     // Return the updated cookie jar and a redirect response to the authorization URL
     Ok((updated_jar, Redirect::to(auth_url.to_string().as_str())))
 }
@@ -84,6 +91,7 @@ pub(super) async fn login(
 /// Returns a tuple containing the updated cookie jar and a simple logout message.
 pub(super) async fn logout(storage: CookieStorage) -> impl IntoResponse {
     let mut jar = storage.jar;
+    let had_session_cookie = jar.get(COOKIE_NAME).is_some();
 
     // Remove the session cookie from the cookie jar
     if let Some(mut cookie) = jar.get(COOKIE_NAME) {
@@ -95,6 +103,8 @@ pub(super) async fn logout(storage: CookieStorage) -> impl IntoResponse {
 
         jar = jar.remove(cookie);
     }
+
+    info!(had_session_cookie, "processed logout request");
 
     // Return the updated cookie jar and a logout message
     (jar, "You are now logged out 👋")
@@ -121,6 +131,50 @@ struct GitHubEmail {
     verified: bool,
 }
 
+#[derive(Debug)]
+struct RequestIpHeaders<'a> {
+    forwarded: Option<&'a str>,
+    x_forwarded_for: Option<&'a str>,
+    x_real_ip: Option<&'a str>,
+    cf_connecting_ip: Option<&'a str>,
+    true_client_ip: Option<&'a str>,
+}
+
+impl<'a> RequestIpHeaders<'a> {
+    fn is_empty(&self) -> bool {
+        self.forwarded.is_none()
+            && self.x_forwarded_for.is_none()
+            && self.x_real_ip.is_none()
+            && self.cf_connecting_ip.is_none()
+            && self.true_client_ip.is_none()
+    }
+}
+
+fn header_value<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
+    headers.get(name).and_then(|value| value.to_str().ok())
+}
+
+fn request_ip_headers(headers: &HeaderMap) -> RequestIpHeaders<'_> {
+    RequestIpHeaders {
+        forwarded: header_value(headers, "forwarded"),
+        x_forwarded_for: header_value(headers, "x-forwarded-for"),
+        x_real_ip: header_value(headers, "x-real-ip"),
+        cf_connecting_ip: header_value(headers, "cf-connecting-ip"),
+        true_client_ip: header_value(headers, "true-client-ip"),
+    }
+}
+
+fn truncate_for_log(value: &str, max_chars: usize) -> String {
+    let total_chars = value.chars().count();
+    let mut truncated: String = value.chars().take(max_chars).collect();
+
+    if total_chars > max_chars {
+        truncated.push_str("...");
+    }
+
+    truncated
+}
+
 /// Handles the authorization request.
 /// Exchanges the authorization code for an access token,
 /// validates the CSRF token, fetches user data and organizations,
@@ -144,24 +198,45 @@ struct GitHubEmail {
 pub(super) async fn authorize(
     service: GithubOauthService,
     Query(query): Query<AuthRequest>,
+    headers: HeaderMap,
     cookie_storage: CookieStorage,
 ) -> Result<Response, Error> {
     let jar = cookie_storage.jar;
+    let ip_headers = request_ip_headers(&headers);
 
-    let http_client = reqwest::ClientBuilder::new()
-        .redirect(reqwest::redirect::Policy::none())
-        .build()?;
+    info!(
+        has_csrf_cookie = jar.get(CSRF_COOKIE_NAME).is_some(),
+        ?ip_headers,
+        "received GitHub OAuth callback"
+    );
+
+    if ip_headers.is_empty() {
+        warn!("no inbound IP-related headers were present on the OAuth callback request");
+    }
+
+    let http_client = oauth2_reqwest::ClientBuilder::new()
+        .redirect(oauth2_reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|e| Error::OauthToken(e.to_string()))?;
 
     // Exchange the authorization code for an access token
+    debug!("exchanging OAuth authorization code for access token");
     let token = service
         .oauth_client
         .exchange_code(AuthorizationCode::new(query.code.clone()))
         .request_async(&http_client)
         .await
         .map_err(|e| Error::OauthToken(e.to_string()))?;
+    debug!("successfully exchanged OAuth authorization code");
 
     // Get the CSRF token cookie from the cookie jar
-    let mut csrf_cookie = jar.get(CSRF_COOKIE_NAME).ok_or(Error::MissingCSRFCookie)?;
+    let mut csrf_cookie = match jar.get(CSRF_COOKIE_NAME) {
+        Some(cookie) => cookie,
+        None => {
+            warn!("missing CSRF cookie on OAuth callback");
+            return Err(Error::MissingCSRFCookie);
+        }
+    };
 
     // Set cookie attributes
     csrf_cookie.set_same_site(SameSite::Lax);
@@ -174,8 +249,10 @@ pub(super) async fn authorize(
 
     // Validate the CSRF token
     if query.state != *csrf_token.secret() {
+        warn!("CSRF token mismatch on OAuth callback");
         return Err(Error::CSRFTokenMismatch);
     }
+    debug!("validated CSRF token");
 
     // Create a new HTTP client
     let client = reqwest::Client::builder()
@@ -185,6 +262,7 @@ pub(super) async fn authorize(
         .map_err(|e| Error::FetchUser(e.to_string()))?;
 
     // Fetch user data from the GitHub API
+    debug!("fetching GitHub user profile");
     let user_data: GitHubUser = client
         .get(GITHUB_USER_URL)
         .header(ACCEPT, HeaderValue::from_static(GITHUB_ACCEPT_TYPE))
@@ -196,20 +274,63 @@ pub(super) async fn authorize(
         .json()
         .await
         .map_err(|e| Error::ParseUser(e.to_string()))?;
+    info!(
+        user_id = user_data.id,
+        login = %user_data.login,
+        "fetched GitHub user profile"
+    );
 
     // Check the username against an endpoint
-    let url = service.config.check_url.replace("{username}", &user_data.login);
-    let response = client
-        .get(&url)
-        .send()
-        .await
-        .map_err(|_| Error::Authorized(url.clone()))?;
+    let url = service
+        .config
+        .check_url
+        .replace("{username}", &user_data.login);
+    info!(
+        login = %user_data.login,
+        check_url = %url,
+        ?ip_headers,
+        "calling authorization check endpoint"
+    );
+    let response = match client.get(&url).send().await {
+        Ok(response) => response,
+        Err(error) => {
+            warn!(
+                login = %user_data.login,
+                check_url = %url,
+                ?ip_headers,
+                error = %error,
+                "authorization check request failed"
+            );
+            return Err(Error::Authorized(url));
+        }
+    };
 
-    if !response.status().is_success() {
+    let check_status = response.status();
+    if !check_status.is_success() {
+        let response_body = response
+            .text()
+            .await
+            .unwrap_or_else(|error| format!("<failed to read response body: {error}>"));
+        let response_body_preview = truncate_for_log(&response_body, 256);
+        warn!(
+            login = %user_data.login,
+            check_url = %url,
+            status = %check_status,
+            ?ip_headers,
+            response_body = %response_body_preview,
+            "authorization check endpoint rejected the user"
+        );
         return Err(Error::Authorized(url));
     }
+    info!(
+        login = %user_data.login,
+        check_url = %url,
+        status = %check_status,
+        "authorization check endpoint accepted the user"
+    );
 
     // Fetch email addresses from the GitHub API
+    debug!(login = %user_data.login, "fetching GitHub email addresses");
     let emails: Vec<GitHubEmail> = client
         .get(GITHUB_EMAILS_URL)
         .header(ACCEPT, HeaderValue::from_static(GITHUB_ACCEPT_TYPE))
@@ -221,6 +342,11 @@ pub(super) async fn authorize(
         .json()
         .await
         .map_err(|e| Error::ParseUser(e.to_string()))?;
+    debug!(
+        login = %user_data.login,
+        email_count = emails.len(),
+        "fetched GitHub email addresses"
+    );
 
     let mut email = None;
 
@@ -229,6 +355,11 @@ pub(super) async fn authorize(
         for e in &emails {
             if e.email.ends_with(&domain) {
                 email = Some(e.email.clone());
+                info!(
+                    login = %user_data.login,
+                    matched_domain = %domain,
+                    "selected GitHub email matching configured domain"
+                );
                 break 'outer;
             }
         }
@@ -239,6 +370,10 @@ pub(super) async fn authorize(
         for e in &emails {
             if e.primary && e.verified {
                 email = Some(e.email.clone());
+                info!(
+                    login = %user_data.login,
+                    "selected primary verified GitHub email"
+                );
                 break;
             }
         }
@@ -247,7 +382,13 @@ pub(super) async fn authorize(
     // if no primary email address is found, return an error
     let email = match email {
         Some(email) => email,
-        None => return Ok("No verified and primary email address found".into_response()),
+        None => {
+            warn!(
+                login = %user_data.login,
+                "no verified GitHub email address matched the configured domains or primary fallback"
+            );
+            return Ok("No verified and primary email address found".into_response());
+        }
     };
 
     let user: User = User {
@@ -270,6 +411,12 @@ pub(super) async fn authorize(
 
     // Remove the CSRF token cookie and add the session cookie to the cookie jar
     let updated_jar = jar.remove(csrf_cookie).add(session_cookie);
+
+    info!(
+        user_id = user.id,
+        login = %user.login,
+        "completed GitHub OAuth authorization flow"
+    );
 
     // Return the updated cookie jar and a redirect response to the home page
     Ok((updated_jar, Redirect::to("/")).into_response())
