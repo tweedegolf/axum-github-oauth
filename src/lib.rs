@@ -11,6 +11,7 @@ use oauth2::{basic::BasicClient, AuthUrl, Client, ClientId, ClientSecret, Redire
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha512};
 use std::{convert::Infallible, env, fmt::Debug};
+use tracing::{debug, warn};
 use url::Url;
 
 static COOKIE_NAME: &str = "SESSION";
@@ -130,8 +131,7 @@ impl Default for Config {
             .map(|d| d.split(',').map(|s| s.to_string()).collect())
             .unwrap_or_default();
 
-        let check_url = env::var("CHECK_URL")
-            .expect("missing CHECK_URL from environment");
+        let check_url = env::var("CHECK_URL").expect("missing CHECK_URL from environment");
 
         Self {
             auth_url: Url::parse(GITHUB_AUTH_URL).unwrap(),
@@ -241,12 +241,23 @@ impl User {
         service: &GithubOauthService,
     ) -> Result<Self, AuthAction> {
         let jar = PrivateCookieJar::from_headers(headers, service.config.session_key.clone());
-        let session_cookie = jar
-            .get(COOKIE_NAME)
-            .ok_or(AuthAction::Redirect(service.config.login_path.clone()))?;
+        let session_cookie = match jar.get(COOKIE_NAME) {
+            Some(cookie) => cookie,
+            None => {
+                debug!(
+                    redirect_path = %service.config.login_path,
+                    "missing session cookie, redirecting to login"
+                );
+                return Err(AuthAction::Redirect(service.config.login_path.clone()));
+            }
+        };
 
-        let user: User = serde_json::from_str(session_cookie.value())
-            .map_err(|e| AuthAction::Error(Error::DeserializeUser(e)))?;
+        let user: User = serde_json::from_str(session_cookie.value()).map_err(|e| {
+            warn!(error = %e, "failed to deserialize session cookie");
+            AuthAction::Error(Error::DeserializeUser(e))
+        })?;
+
+        debug!(user_id = user.id, login = %user.login, "authenticated user from session cookie");
 
         Ok(user)
     }
